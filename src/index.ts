@@ -13,10 +13,15 @@ import { registerWikipediaSearchTool } from "./tools/wikipediaSearch.js";
 import { registerGithubSearchTool } from "./tools/githubSearch.js";
 import { log } from "./utils/logger.js";
 
+// Import Symphony components (lazy load to avoid startup issues)
+// import { conductor } from "./symphony/conductor.js";
+// import { researchMemory } from "./memory.js";
+
 // Configuration schema for the EXA API key and tool selection
 export const configSchema = z.object({
   exaApiKey: z.string().optional().describe("Exa AI API key for search operations"),
   enabledTools: z.array(z.string()).optional().describe("List of tools to enable (if not specified, all tools are enabled)"),
+  enableSymphony: z.boolean().default(true).describe("Enable Symphony orchestration tools"),
   debug: z.boolean().default(false).describe("Enable debug logging")
 });
 
@@ -29,22 +34,45 @@ const availableTools = {
   'competitor_finder_exa': { name: 'Competitor Finder', description: 'Find business competitors', enabled: true },
   'linkedin_search_exa': { name: 'LinkedIn Search', description: 'Search LinkedIn profiles and companies', enabled: true },
   'wikipedia_search_exa': { name: 'Wikipedia Search', description: 'Search Wikipedia articles', enabled: true },
-  'github_search_exa': { name: 'GitHub Search', description: 'Search GitHub repositories and code', enabled: true }
+  'github_search_exa': { name: 'GitHub Search', description: 'Search GitHub repositories and code', enabled: true },
+  // Symphony tools (dynamically registered)
+  'symphony': { name: 'Symphony Orchestrator', description: 'Orchestrate multiple seekers for comprehensive research', enabled: true },
+  'seek_truth': { name: 'Truth Seeker', description: 'Direct web search with truth-focused filtering', enabled: true },
+  'seek_scholar': { name: 'Scholar Seeker', description: 'Academic and research paper focused search', enabled: true },
+  'seek_commerce': { name: 'Commerce Seeker', description: 'Business and market focused search', enabled: true },
+  'seek_source': { name: 'Source Seeker', description: 'Official and authoritative source search', enabled: true },
+  'seek_rival': { name: 'Rival Seeker', description: 'Competitive analysis and opposing viewpoints', enabled: true },
+  'seek_network': { name: 'Network Seeker', description: 'Social and professional network search', enabled: true },
+  'seek_lore': { name: 'Lore Seeker', description: 'Historical and cultural context search', enabled: true },
+  'memory_search': { name: 'Memory Search', description: 'Search past research sessions', enabled: true },
+  'memory_insights': { name: 'Memory Insights', description: 'Get insights from research history', enabled: true }
 };
 
 /**
- * Exa AI Web Search MCP Server
+ * Exa AI Web Search MCP Server with Symphony Orchestration
  * 
  * This MCP server integrates Exa AI's search capabilities with Claude and other MCP-compatible clients.
  * Exa is a search engine and API specifically designed for up-to-date web searching and retrieval,
  * offering more recent and comprehensive results than what might be available in an LLM's training data.
  * 
- * The server provides tools that enable:
+ * The server provides two modes of operation:
+ * 
+ * **Standard Tools:**
  * - Real-time web searching with configurable parameters
  * - Research paper searches
  * - Company research and analysis
  * - Competitive intelligence
  * - And more!
+ * 
+ * **Symphony Orchestration (NEW):**
+ * - Orchestrated multi-seeker research using the "Seven Seekers" pattern
+ * - Truth, Scholar, Commerce, Source, Rival, Network, and Lore seekers
+ * - Resonance detection between findings from different sources
+ * - Intelligent synthesis of multi-perspective research
+ * - Research memory and pattern recognition
+ * - Individual seeker access for targeted searches
+ * 
+ * Enable Symphony features with enableSymphony: true in configuration.
  */
 
 export default function ({ config }: { config: z.infer<typeof configSchema> }) {
@@ -115,8 +143,139 @@ export default function ({ config }: { config: z.infer<typeof configSchema> }) {
       registeredTools.push('github_search_exa');
     }
     
+    // Register Symphony tools if enabled
+    if (config.enableSymphony) {
+      // Main symphony orchestration tool
+      server.tool(
+        "symphony",
+        "Orchestrate multiple seekers to research a topic",
+        {
+          query: z.string().describe("What to research"),
+          seekers: z.array(z.string()).optional().describe("Which seekers to use (default: all)"),
+          resonanceThreshold: z.number().optional().describe("Similarity threshold for resonance detection (0-1)")
+        },
+        async ({ query, seekers, resonanceThreshold }) => {
+          try {
+            // Dynamic import to avoid startup issues
+            const { conductor } = await import("./symphony/conductor.js");
+            const { researchMemory } = await import("./memory.js");
+            
+            // Set API key for seekers
+            if (config.exaApiKey) {
+              process.env.EXA_API_KEY = config.exaApiKey;
+            }
+            
+            const symphony = await conductor.perform(query, {
+              seekers,
+              resonanceThreshold
+            });
+            
+            // Remember this research
+            researchMemory.remember(symphony);
+            
+            return {
+              content: [{
+                type: "text" as const,
+                text: JSON.stringify(symphony, null, 2)
+              }]
+            };
+          } catch (error) {
+            return {
+              content: [{
+                type: "text" as const,
+                text: `Symphony error: ${error instanceof Error ? error.message : String(error)}`
+              }],
+              isError: true
+            };
+          }
+        }
+      );
+
+      // Individual seeker tools
+      const seekerNames = ['truth', 'scholar', 'commerce', 'source', 'rival', 'network', 'lore'];
+      
+      seekerNames.forEach(name => {
+        server.tool(
+          `seek_${name}`,
+          `Use the ${name} seeker directly`,
+          {
+            query: z.string().describe("What to search for")
+          },
+          async ({ query }) => {
+            try {
+              // Dynamic import to avoid startup issues
+              const { conductor } = await import("./symphony/conductor.js");
+              
+              // Set API key for seekers
+              if (config.exaApiKey) {
+                process.env.EXA_API_KEY = config.exaApiKey;
+              }
+              
+              const seeker = conductor.seekers[name];
+              const findings = await seeker.seek(query);
+              
+              return {
+                content: [{
+                  type: "text" as const,
+                  text: JSON.stringify(findings, null, 2)
+                }]
+              };
+            } catch (error) {
+              return {
+                content: [{
+                  type: "text" as const,
+                  text: `Seeker error: ${error instanceof Error ? error.message : String(error)}`
+                }],
+                isError: true
+              };
+            }
+          }
+        );
+      });
+
+      // Memory tools
+      server.tool(
+        "memory_search",
+        "Search past research",
+        {
+          query: z.string().describe("What to search for in memory")
+        },
+        async ({ query }) => {
+          const { researchMemory } = await import("./memory.js");
+          const similar = researchMemory.findSimilar(query);
+          return {
+            content: [{
+              type: "text" as const,
+              text: JSON.stringify(similar, null, 2)
+            }]
+          };
+        }
+      );
+
+      server.tool(
+        "memory_insights",
+        "Get insights from research history",
+        {},
+        async () => {
+          const { researchMemory } = await import("./memory.js");
+          const insights = researchMemory.getInsights();
+          return {
+            content: [{
+              type: "text" as const,
+              text: JSON.stringify(insights, null, 2)
+            }]
+          };
+        }
+      );
+
+      registeredTools.push('symphony', ...seekerNames.map(name => `seek_${name}`), 'memory_search', 'memory_insights');
+    }
+    
     if (config.debug) {
       log(`Registered ${registeredTools.length} tools: ${registeredTools.join(', ')}`);
+      if (config.enableSymphony) {
+        log(`Symphony orchestration enabled with seekers: ${Object.keys(conductor.seekers).join(', ')}`);
+      }
     }
     
     // Return the server object (Smithery CLI handles transport)
